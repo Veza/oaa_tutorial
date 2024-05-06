@@ -1,7 +1,9 @@
 from oaaclient.client import OAAClient, OAAClientError
 from oaaclient.templates import CustomApplication, OAAPropertyType, OAAPermission
-import os, sys
+import os, json
 import requests
+from dotenv import load_dotenv
+load_dotenv()
 
 veza_url = os.getenv('VEZA_URL')
 veza_api_key = os.getenv('VEZA_API_KEY')
@@ -13,14 +15,14 @@ headers = {
 def main():
     app = CustomApplication(name='Sample App', application_type='PagerDuty')
 
-    # Custom Properties
+    # Define Custom Properties
     app.property_definitions.define_local_user_property('email', OAAPropertyType.STRING)
     app.property_definitions.define_local_user_property('is_billed', OAAPropertyType.BOOLEAN)
     app.property_definitions.define_resource_property('team', 'pagerduty_id', OAAPropertyType.STRING)
     app.property_definitions.define_resource_property('team', 'summary', OAAPropertyType.STRING)
     app.property_definitions.define_resource_property('team', 'default_role', OAAPropertyType.STRING)
 
-    # Application specific permissions
+    # Add Application specific permissions
     app.add_custom_permission('admin', permissions=[OAAPermission.DataWrite, OAAPermission.DataRead, OAAPermission.DataDelete, OAAPermission.MetadataRead, OAAPermission.MetadataWrite])
     app.add_custom_permission('limited_user', permissions=[OAAPermission.DataRead, OAAPermission.MetadataRead])
     app.add_custom_permission('manager', permissions=[OAAPermission.DataWrite, OAAPermission.DataRead, OAAPermission.MetadataWrite, OAAPermission.MetadataRead])
@@ -32,7 +34,7 @@ def main():
     app.add_custom_permission('restricted_access', permissions=[OAAPermission.MetadataRead, OAAPermission.MetadataWrite])
     app.add_custom_permission('user', permissions=[OAAPermission.DataRead, OAAPermission.MetadataRead])
 
-    # Local Roles
+    # Add Local Roles
     app.add_local_role('Golbal Admin', unique_id='admin', permissions=['admin'])
     app.add_local_role('Responder', unique_id='limited_user', permissions=['limited_user'])
     app.add_local_role('Observer', unique_id='observer', permissions=['observer'])
@@ -44,8 +46,8 @@ def main():
     app.add_local_role('Responder', unique_id='responder', permissions=['responder'])
     app.add_local_role('Manager', unique_id='manager', permissions=['manager'])
 
-    # Local Users
-    response = requests.get('https://api.pagerduty.com/users', headers=headers)
+    # Add Local Users
+    response = requests.get('https://api.pagerduty.com/users?limit=100', headers=headers)
     response = response.json()
     for user in response['users']:
         # Add local user. Link the local user to an IdP using email
@@ -57,27 +59,40 @@ def main():
         # Populate custom properties
         new_user.set_property('email', user.get('email'))
         new_user.set_property('is_billed', user.get('billed'))
-        
-    # Resources (Map PagerDuty Teams to Veza graph Resources)
-    response = requests.get('https://api.pagerduty.com/teams', headers=headers)
-    response = response.json()        
-    for team in response['teams']:
+
+    # Add Local Groups
+    response = requests.get('https://api.pagerduty.com/teams?limit=100', headers=headers)
+    teams = response.json()['teams']
+    for team in teams:
+        app.add_local_group(team.get('name'), unique_id=team.get("id"))
+
+    # Add Resources (Map PagerDuty Teams to Veza Custom Application Teamplate Resources)
+    for team in teams:        
         # Add local resource
         resource = app.add_resource(team.get('name'), resource_type='team')
-        # Populate built-in property description
-        resource.description = team.get('description')[:255] # PG desc max 1,024 char
+        # Populate built-in property description (max 1,024 char)
+        resource.description = team.get('description')[:255] if team.get('description') else None
         # Populate Custom Properties
         resource.set_property('pagerduty_id', team.get('id'))
         resource.set_property('summary', team.get('summary'))
         resource.set_property('default_role', team.get('default_role'))
 
-    # Associate local user to local role
-    for resource in app.resources:
-        response = requests.get(f'https://api.pagerduty.com/teams/{team.get('id')}/members', headers=headers)
+    # Assign local roles to users
+    for team in app.resources:
+        resource = app.resources[team]
+        team_id = resource.properties.get('pagerduty_id')
+        response = requests.get(f'https://api.pagerduty.com/teams/{team_id}/members',
+                                headers=headers)
         response = response.json()
         for member in response['members']:
             app.local_users[member['user']['id']].add_role(member['role'], resources=[resource])
 
+            # Add local user to group
+            app.local_users[member['user']['id']].add_group(team_id)
+
+
+    # Print the payload for debugging
+    # print(json.dumps(app.get_payload()))
 
     # Connect to the API to Push to Veza
     provider_name = 'Sample-PagerDuty'
