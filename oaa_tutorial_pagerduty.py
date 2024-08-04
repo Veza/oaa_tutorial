@@ -1,6 +1,6 @@
 from oaaclient.client import OAAClient, OAAClientError
 from oaaclient.templates import CustomApplication, OAAPropertyType, OAAPermission
-import os, json
+import os, sys
 import requests
 from dotenv import load_dotenv
 load_dotenv()
